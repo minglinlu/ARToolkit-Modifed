@@ -205,7 +205,6 @@ cv::SiftDescriptorExtractor cv_sift_detector;
 
 void detect(int a, int b, int c)
 {
-    cout << a << " " << b << " " << c << endl;
     while(1){
         if(detectedPage==-2){
             //1.extract sift descriptor
@@ -265,8 +264,8 @@ bool isMatched(Mat &srcImage,Mat &dstImage,vector<KeyPoint> &src_points,vector<K
     return true;
 }
 
-int getInliners(vector<KeyPoint> src_points,vector<KeyPoint> dst_points,vector<DMatch> &final_matches,vector<cv::Point3f> &src_3D,vector<cv::Point2f> &dst_2D){
-    vector<cv::Point2f> querymatches, trainmatches;
+vector<DMatch> getInliners(vector<KeyPoint> src_points,vector<KeyPoint> dst_points,vector<DMatch> &final_matches,vector<cv::Point3f> &src_3D,vector<cv::Point2f> &dst_2D){
+    vector<cv::Point2f> trainmatches, querymatches;
     vector<cv::KeyPoint> p1, p2, src_p1, dst_p2;
     
     for (int i = 0; i < final_matches.size(); i++){
@@ -287,7 +286,7 @@ int getInliners(vector<KeyPoint> src_points,vector<KeyPoint> dst_points,vector<D
     
     for (int i = 0; i < final_matches.size(); i++)
     {
-        //if (status[i] != 0)
+        if (status[i] != 0)
         {
             super_final_matches.push_back (final_matches[i]);
             //src_p1.push_back(src_points[final_matches[i].queryIdx]);
@@ -297,11 +296,12 @@ int getInliners(vector<KeyPoint> src_points,vector<KeyPoint> dst_points,vector<D
             index++;
         }
     }
-    return index;
+    return super_final_matches;
 }
 
 void updateCamPose(vector<cv::Point3f> &src_3D,vector<cv::Point2f> &dst_2D,Mat &rotation_vector,Mat &translation_vector,Mat &_R_matrix){
     // Solve for pose
+    //cv::solvePnPRansac(src_3D, dst_2D, camera_matrix, dist_coeffs, rotation_vector, translation_vector);
     cv::solvePnP(src_3D, dst_2D, camera_matrix, dist_coeffs, rotation_vector, translation_vector);
     Rodrigues(rotation_vector,_R_matrix);                   // converts Rotation Vector to Matrix
     _R_matrix.convertTo(_R_matrix, CV_32FC1);
@@ -345,22 +345,14 @@ void track(cv::Mat capImage,string queryImage){
     final_matches = matches;
     vector<cv::Point3f> src_3D;
     vector<cv::Point2f> dst_2D;
-    int match_num=getInliners(src_points, dst_points,final_matches,src_3D,dst_2D);
+    vector<DMatch> super_final_matches=getInliners(src_points, dst_points,final_matches,src_3D,dst_2D);
+    int match_num =(int)super_final_matches.size();
     cout << "number of inlier_matches : " << match_num << endl;
     if(match_num<6){
         cout<<"tracking lost, matches number <6. "<<endl;
         detectedPage=-2;
         return;
     }
-    
-    //    Mat src_out_img,dst_out_img;
-    //    drawKeypoints(srcImage, src_points, src_out_img, Scalar(0,255,0));
-    //    drawKeypoints(dstImage, dst_points, dst_out_img, Scalar(0,255,0));
-    //    imshow("src_out_img",src_out_img);
-    //    imshow("dst_out_img",dst_out_img);
-    //Mat imgMatch;
-    //drawMatches(srcImage, src_points, dstImage, dst_points, super_final_matches, imgMatch);
-    //imshow("imgMatch",imgMatch);
     
     // Output rotation and translation
     cv::Mat rotation_vector; // Rotation in axis-angle form
@@ -395,7 +387,11 @@ void track(cv::Mat capImage,string queryImage){
         final_matches = matches;
         vector<cv::Point3f> src_3D;
         vector<cv::Point2f> dst_2D;
-        int match_num=getInliners(src_points, dst_points,final_matches,src_3D,dst_2D);
+        vector<DMatch> super_final_matches=getInliners(src_points, dst_points,final_matches,src_3D,dst_2D);
+        int match_num=(int)super_final_matches.size();
+//        Mat imgMatch;
+//        drawMatches(srcImage, src_points, dstImage, dst_points, super_final_matches, imgMatch);
+//        imshow("imgMatch",imgMatch);
         cout << "number of inlier_matches : " << match_num << endl;
         if(match_num<6){
             cout<<"tracking lost, inlier_matches number <6. "<<endl;
