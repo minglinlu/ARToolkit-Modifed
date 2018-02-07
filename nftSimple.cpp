@@ -79,6 +79,7 @@
 
 #include "ARMarkerNFT.h"
 #include "trackingSub.h"
+#include "commonCvFunctions.h"
 
 // =========================LML=ADD============================================
 #include <iostream>
@@ -101,11 +102,13 @@
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/nonfree/features2d.hpp>
 #include <opencv2/legacy/legacy.hpp>
+#include <opencv2/video/tracking.hpp>
 
 #include <Eigen/Dense>
 #include <Eigen/SVD>
 using namespace std;
 using namespace cv;
+using namespace cvar;
 
 DEFINE_string(output_folder, "", "Output folder for ranked list");
 DEFINE_int32(match_num, 10, "The length of the ranked list (top-k)");
@@ -115,6 +118,7 @@ typedef struct _target{
     unsigned int id;
     bool valid;
     ARPose pose;
+    vector<cv::Point2f> object_position;
 } target;
 // ============================================================================
 
@@ -255,7 +259,7 @@ bool isMatched(Mat &srcImage,Mat &dstImage,vector<KeyPoint> &src_points,vector<K
     BFMatcher matcher (NORM_HAMMING,true);
     matcher.match(src_descriptor,dst_descriptor,matches);
     
-    cout<<"original match points     :"<<matches.size()<<endl;
+    //cout<<"original match points     :"<<matches.size()<<endl;
     if(matches.size()<6){
         cout<<"tracking lost, matches number <6. "<<endl;
         
@@ -264,9 +268,9 @@ bool isMatched(Mat &srcImage,Mat &dstImage,vector<KeyPoint> &src_points,vector<K
     return true;
 }
 
-vector<DMatch> getInliners(vector<KeyPoint> src_points,vector<KeyPoint> dst_points,vector<DMatch> &final_matches,vector<cv::Point3f> &src_3D,vector<cv::Point2f> &dst_2D){
+vector<KeyPoint> getInliners(vector<KeyPoint> src_points,vector<KeyPoint> dst_points,vector<DMatch> &final_matches,vector<cv::Point3f> &src_3D,vector<cv::Point2f> &dst_2D,cv::Mat &H){
     vector<cv::Point2f> trainmatches, querymatches;
-    vector<cv::KeyPoint> p1, p2, src_p1, dst_p2;
+    vector<cv::KeyPoint> p1, p2, src_p1, dst_p2,inliners;
     
     for (int i = 0; i < final_matches.size(); i++){
         p1.push_back (src_points[final_matches[i].queryIdx]);
@@ -279,16 +283,19 @@ vector<DMatch> getInliners(vector<KeyPoint> src_points,vector<KeyPoint> dst_poin
     }
     
     vector<uchar> status;
-    Mat h = findHomography (querymatches, trainmatches, status, CV_FM_RANSAC, 10);
+    H = findHomography (querymatches, trainmatches, status, CV_FM_RANSAC, 10);
     //cout<<h<<endl;
     int index = 0;
     vector<DMatch> super_final_matches;
     
+    src_3D.clear();
+    dst_2D.clear();
     for (int i = 0; i < final_matches.size(); i++)
     {
         if (status[i] != 0)
         {
             super_final_matches.push_back (final_matches[i]);
+            inliners.push_back(dst_points[final_matches[i].trainIdx]);
             //src_p1.push_back(src_points[final_matches[i].queryIdx]);
             //dst_p2.push_back(dst_points[final_matches[i].trainIdx]);
             src_3D.push_back(cv::Point3d(src_points[final_matches[i].queryIdx].pt.x, src_points[final_matches[i].queryIdx].pt.y, 0.0f));
@@ -296,7 +303,7 @@ vector<DMatch> getInliners(vector<KeyPoint> src_points,vector<KeyPoint> dst_poin
             index++;
         }
     }
-    return super_final_matches;
+    return inliners;
 }
 
 void updateCamPose(vector<cv::Point3f> &src_3D,vector<cv::Point2f> &dst_2D,Mat &rotation_vector,Mat &translation_vector,Mat &_R_matrix){
@@ -345,68 +352,170 @@ void track(cv::Mat capImage,string queryImage){
     final_matches = matches;
     vector<cv::Point3f> src_3D;
     vector<cv::Point2f> dst_2D;
-    vector<DMatch> super_final_matches=getInliners(src_points, dst_points,final_matches,src_3D,dst_2D);
-    int match_num =(int)super_final_matches.size();
-    cout << "number of inlier_matches : " << match_num << endl;
+    cv::Mat H;
+    vector<KeyPoint> inliners=getInliners(src_points, dst_points,final_matches,src_3D,dst_2D,H);
+    int match_num =(int)inliners.size();
+    //cout << "number of inlier_matches : " << match_num << endl;
     if(match_num<6){
         cout<<"tracking lost, matches number <6. "<<endl;
         detectedPage=-2;
         return;
     }
-    
+//    Mat outimg;
+//    drawKeypoints(prevImage, inliners, outimg , Scalar(255,0,0));
+//    imshow("outimg",outimg);
+//    return;
     // Output rotation and translation
     cv::Mat rotation_vector; // Rotation in axis-angle form
     cv::Mat translation_vector;
     cv::Mat _R_matrix;
-    updateCamPose(src_3D,dst_2D,rotation_vector,translation_vector,_R_matrix);
+    
+    /*
+    Mat Amarker=camera_matrix.clone();
+    Mat invA =camera_matrix.inv();
+    Mat tmpM = invA*H*Amarker;
+    
+    Mat Rcol[2],rMat[3];
+    
+    double lambda[2];
+    for(int i=0; i<2; i++){
+        //            Rcol[i].create(3,1,CV_32FC1);
+        Rcol[i] = tmpM.col(i);
+        lambda[i] = 1.0 / cv::norm(Rcol[i], NORM_L2);
+        rMat[i] = Rcol[i] * lambda[i];
+        //            lambda[i] /= camera_matrix.at<_Tp>(i, i);
+        printf("lambda %d: %f\n", i, lambda[i]);
+    }
+    
+    rMat[2] = rMat[0].cross(rMat[1]);
+    cout<<tmpM<<endl;
+    //printf("rotation & translation:\n");
+    rotation_vector.create(3,3,tmpM.type());
+    translation_vector.create(3,1,tmpM.type());
+    for(int j=0; j<3; j++){
+        for(int i=0; i<3; i++){
+            rotation_vector.at<double>(i,j) = rMat[j].at<double>(i,0);
+            printf("%f,",rotation_vector.at<double>(i,j));
+        }
+        translation_vector.at<double>(j,0) = tmpM.at<double>(j,2) * lambda[0];
+        printf("\t%f\n", translation_vector.at<double>(j,0));
+    }*/
+    
+    //updateCamPose(src_3D,dst_2D,rotation_vector,translation_vector,_R_matrix);
     
     //cout<<_R_matrix.size()<<endl;
+    Size size=srcImage.size();
+    vector<cv::Point2f> pos_points=calcAffineTransformRect(size, H);
+    //cout<<pos_points<<endl;
+    
     target *new_target = new target();
+    new_target->object_position=pos_points;
     new_target->id=++targetId;
-    //new_target->pose={0.7657,0.1866,-0.6155,0,-0.2725,0.9609,-0.0477,0,0.5826,0.2042,0.7866,0,-232.2759,-92.8866,-826.4772,1};
-    new_target->pose={
-        _R_matrix.at<float>(0,0),_R_matrix.at<float>(1,0),_R_matrix.at<float>(2,0),0,
-        _R_matrix.at<float>(0,1),_R_matrix.at<float>(1,1),_R_matrix.at<float>(2,1),0,
-        _R_matrix.at<float>(0,2),_R_matrix.at<float>(1,2),_R_matrix.at<float>(2,2),0,
-        translation_vector.at<float>(0,1),translation_vector.at<float>(0,1),translation_vector.at<float>(0,2),1
-    };
+    new_target->pose={0.7657,0.1866,-0.6155,0,-0.2725,0.9609,-0.0477,0,0.5826,0.2042,0.7866,0,-232.2759,-92.8866,-826.4772,1};
+//    new_target->pose={
+//        _R_matrix.at<float>(0,0),_R_matrix.at<float>(1,0),_R_matrix.at<float>(2,0),0,
+//        _R_matrix.at<float>(0,1),_R_matrix.at<float>(1,1),_R_matrix.at<float>(2,1),0,
+//        _R_matrix.at<float>(0,2),_R_matrix.at<float>(1,2),_R_matrix.at<float>(2,2),0,
+//        translation_vector.at<float>(0,1),translation_vector.at<float>(0,1),translation_vector.at<float>(0,2),1
+//    };
+//    new_target->pose={
+//        rotation_vector.at<double>(0,0),rotation_vector.at<double>(1,0),rotation_vector.at<double>(2,0),0,
+//        rotation_vector.at<double>(0,1),rotation_vector.at<double>(1,1),rotation_vector.at<double>(2,1),0,
+//        rotation_vector.at<double>(0,2),rotation_vector.at<double>(1,2),rotation_vector.at<double>(2,2),0,
+//        translation_vector.at<double>(0,0),translation_vector.at<double>(0,1),translation_vector.at<double>(0,2),1
+//    };
     new_target->valid=true;
     targetsList.push_back(new_target);
     
     while(1){
         //cout<<"tracking..."<<endl;
-        dstImage=input_img;
+        dstImage=input_img.clone();
         cvtColor(dstImage, dstImage, CV_BGR2GRAY); // 转为灰度图像，摄像头的输入图像
-        if(!isMatched(srcImage, dstImage, src_points, dst_points,matches)){
-            trackingLost(new_target);
-            detectedPage=-2;
-            break;
+        vector<cv::Point2f> next_corners;
+        vector<float> err;
+        vector<unsigned char> track_status;
+        
+        cv::calcOpticalFlowPyrLK(prevImage, dstImage, dst_2D, next_corners, track_status, err);
+        //cout<<dst_2D<<endl;
+        Mat outimg;
+        inliners.clear();
+        for( size_t i = 0; i < dst_2D.size(); i++ ) {
+            inliners.push_back(cv::KeyPoint(dst_2D[i], 1.f));
         }
+//        drawKeypoints(dstImage, inliners, outimg , Scalar(255,0,0));
+//        namedWindow("outimg");
+//        imshow("outimg",outimg);
+        //startWindowThread();
+        //imwrite("/Users/lml/Desktop/tmp.jpg",outimg);
+        int tr_num = 0;
+        vector<unsigned char>::iterator status_itr = track_status.begin();
+        while(status_itr != track_status.end()){
+            if(*status_itr > 0)
+                tr_num++;
+            status_itr++;
+        }
+        if(tr_num < 6){
+            trackingLost(new_target);
+            return ;
+        }
+        else{
+            H = findHomography(Mat(dst_2D), Mat(next_corners), track_status,CV_RANSAC,5);
+            if(countNonZero(H)==0){
+                return;
+            }
+            else{
+                vector<cv::Point2f> next_object_position = calcAffineTransformPoints(new_target->object_position, H);
+                if(!checkPtInsideImage(prevImage.size(), next_object_position)||!checkRectShape(next_object_position)||checkInsideArea(next_corners, next_object_position, track_status)<6){
+                    trackingLost(new_target);
+                    return;
+                }
+                Mat outimg=dstImage.clone();
+                cv::line(outimg,next_object_position[3],next_object_position[0],Scalar(255,0,0));
+                for(int i=0;i<3;i++){
+                    line(outimg,next_object_position[i],next_object_position[i+1],Scalar(255,0,5));
+                }
+                inliners.clear();
+                for( size_t i = 0; i < next_corners.size(); i++ ) {
+                    inliners.push_back(cv::KeyPoint(next_corners[i], 1.f));
+                }
+                drawKeypoints(outimg, inliners, outimg , Scalar(255,0,0));
+                namedWindow("result");
+                imshow("result",outimg);
+                new_target->object_position=next_object_position;
+                dstImage.copyTo(prevImage);
+                dst_2D = next_corners;
+            }
+         }
+//        if(!isMatched(srcImage, dstImage, src_points, dst_points,matches)){
+//            trackingLost(new_target);
+//            detectedPage=-2;
+//            break;
+//        }
         
         //接下来是RANSAC剔除误匹配
-        final_matches = matches;
-        vector<cv::Point3f> src_3D;
-        vector<cv::Point2f> dst_2D;
-        vector<DMatch> super_final_matches=getInliners(src_points, dst_points,final_matches,src_3D,dst_2D);
-        int match_num=(int)super_final_matches.size();
+//        final_matches = matches;
+//        vector<cv::Point3d> src_3D;
+//        vector<cv::Point2d> dst_2D;
+//        inliners=getInliners(src_points, dst_points,final_matches,src_3D,dst_2D,H);
+//        int match_num=(int)inliners.size();
 //        Mat imgMatch;
 //        drawMatches(srcImage, src_points, dstImage, dst_points, super_final_matches, imgMatch);
 //        imshow("imgMatch",imgMatch);
-        cout << "number of inlier_matches : " << match_num << endl;
-        if(match_num<6){
-            cout<<"tracking lost, inlier_matches number <6. "<<endl;
-            trackingLost(new_target);
-            detectedPage=-2;
-            break;
-        }
+       // cout << "number of inlier_matches : " << match_num << endl;
+//        if(match_num<6){
+//            cout<<"tracking lost, inlier_matches number <6. "<<endl;
+//            trackingLost(new_target);
+//            detectedPage=-2;
+//            break;
+//        }
         
-        updateCamPose(src_3D,dst_2D,rotation_vector,translation_vector,_R_matrix);
-        new_target->pose={
-            _R_matrix.at<float>(0,0),_R_matrix.at<float>(1,0),_R_matrix.at<float>(2,0),0,
-            _R_matrix.at<float>(0,1),_R_matrix.at<float>(1,1),_R_matrix.at<float>(2,1),0,
-            _R_matrix.at<float>(0,2),_R_matrix.at<float>(1,2),_R_matrix.at<float>(2,2),0,
-            translation_vector.at<float>(0,1),translation_vector.at<float>(0,1),translation_vector.at<float>(0,2),1
-        };
+        //updateCamPose(src_3D,dst_2D,rotation_vector,translation_vector,_R_matrix);
+//        new_target->pose={
+//            _R_matrix.at<float>(0,0),_R_matrix.at<float>(1,0),_R_matrix.at<float>(2,0),0,
+//            _R_matrix.at<float>(0,1),_R_matrix.at<float>(1,1),_R_matrix.at<float>(2,1),0,
+//            _R_matrix.at<float>(0,2),_R_matrix.at<float>(1,2),_R_matrix.at<float>(2,2),0,
+//            translation_vector.at<float>(0,0),translation_vector.at<float>(0,1),translation_vector.at<float>(0,2),1
+//        };
         
         detectedPage=-1;
     }
@@ -892,6 +1001,8 @@ static void mainLoop(void)
     if ((image = arVideoGetImage()) != NULL) {
         gARTImage = image;	// Save the fetched image.
         webcam >> input_img;
+        //input_img=imread("/Users/lml/Desktop/webcam.png");
+        //imwrite("/Users/lml/Desktop/webcam.jpg", input_img);
         gCallCountMarkerDetect++; // Increment ARToolKit FPS counter.
         
         //char *convImg=(char *)gARTImage;
@@ -1080,12 +1191,13 @@ static void Display(void)
     //    DrawCube();
     mutex_targetsList.lock();
     //cout<<"targetsList.size():"<<targetsList.size()<<endl;
+    //gluLookAt(0,0,0,0,0,1,0,-1,0);
     for(auto target:targetsList){
         glLoadMatrixd(target->pose.T);
-        //        cout<<target->pose.T[0]<<","<<target->pose.T[1]<<","<<target->pose.T[2]<<target->pose.T[3]<<endl;
-        //        cout<<target->pose.T[4]<<","<<target->pose.T[5]<<","<<target->pose.T[6]<<target->pose.T[7]<<endl;
-        //        cout<<target->pose.T[8]<<","<<target->pose.T[9]<<","<<target->pose.T[10]<<target->pose.T[11]<<endl;
-        //        cout<<target->pose.T[12]<<","<<target->pose.T[13]<<","<<target->pose.T[14]<<target->pose.T[15]<<endl;
+//                cout<<target->pose.T[0]<<","<<target->pose.T[1]<<","<<target->pose.T[2]<<target->pose.T[3]<<endl;
+//                cout<<target->pose.T[4]<<","<<target->pose.T[5]<<","<<target->pose.T[6]<<target->pose.T[7]<<endl;
+//                cout<<target->pose.T[8]<<","<<target->pose.T[9]<<","<<target->pose.T[10]<<target->pose.T[11]<<endl;
+//                cout<<target->pose.T[12]<<","<<target->pose.T[13]<<","<<target->pose.T[14]<<","<<target->pose.T[15]<<endl;
         DrawCube();
     }
     mutex_targetsList.unlock();
