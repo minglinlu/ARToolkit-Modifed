@@ -411,13 +411,13 @@ void track(cv::Mat capImage,string queryImage){
     target *new_target = new target();
     new_target->object_position=pos_points;
     new_target->id=++targetId;
-    new_target->pose={0.7657,0.1866,-0.6155,0,-0.2725,0.9609,-0.0477,0,0.5826,0.2042,0.7866,0,-232.2759,-92.8866,-826.4772,1};
-//    new_target->pose={
-//        _R_matrix.at<float>(0,0),_R_matrix.at<float>(1,0),_R_matrix.at<float>(2,0),0,
-//        _R_matrix.at<float>(0,1),_R_matrix.at<float>(1,1),_R_matrix.at<float>(2,1),0,
-//        _R_matrix.at<float>(0,2),_R_matrix.at<float>(1,2),_R_matrix.at<float>(2,2),0,
-//        translation_vector.at<float>(0,1),translation_vector.at<float>(0,1),translation_vector.at<float>(0,2),1
-//    };
+//    new_target->pose={0.7657,0.1866,-0.6155,0,-0.2725,0.9609,-0.0477,0,0.5826,0.2042,0.7866,0,-232.2759,-92.8866,-826.4772,1};
+    new_target->pose={
+        1,0,0,0,
+        0,1,0,0,
+        0,0,1,0,
+        320,240,-800,1
+    };
 //    new_target->pose={
 //        rotation_vector.at<double>(0,0),rotation_vector.at<double>(1,0),rotation_vector.at<double>(2,0),0,
 //        rotation_vector.at<double>(0,1),rotation_vector.at<double>(1,1),rotation_vector.at<double>(2,1),0,
@@ -428,6 +428,7 @@ void track(cv::Mat capImage,string queryImage){
     targetsList.push_back(new_target);
     
     while(1){
+        //continue;
         //cout<<"tracking..."<<endl;
         dstImage=input_img.clone();
         cvtColor(dstImage, dstImage, CV_BGR2GRAY); // 转为灰度图像，摄像头的输入图像
@@ -436,6 +437,8 @@ void track(cv::Mat capImage,string queryImage){
         vector<unsigned char> track_status;
         
         cv::calcOpticalFlowPyrLK(prevImage, dstImage, dst_2D, next_corners, track_status, err);
+        new_target->pose.T[12]=next_corners[0].x-320;
+        new_target->pose.T[13]=240-next_corners[0].y;
         //cout<<dst_2D<<endl;
         Mat outimg;
         inliners.clear();
@@ -464,6 +467,7 @@ void track(cv::Mat capImage,string queryImage){
                 return;
             }
             else{
+                cout<<new_target->object_position<<endl;
                 vector<cv::Point2f> next_object_position = calcAffineTransformPoints(new_target->object_position, H);
                 if(!checkPtInsideImage(prevImage.size(), next_object_position)||!checkRectShape(next_object_position)||checkInsideArea(next_corners, next_object_position, track_status)<6){
                     trackingLost(new_target);
@@ -1193,6 +1197,8 @@ static void Display(void)
     //cout<<"targetsList.size():"<<targetsList.size()<<endl;
     //gluLookAt(0,0,0,0,0,1,0,-1,0);
     for(auto target:targetsList){
+        //target->pose.T[13]+=1;
+        //target->pose.T[14]+=1;
         glLoadMatrixd(target->pose.T);
 //                cout<<target->pose.T[0]<<","<<target->pose.T[1]<<","<<target->pose.T[2]<<target->pose.T[3]<<endl;
 //                cout<<target->pose.T[4]<<","<<target->pose.T[5]<<","<<target->pose.T[6]<<target->pose.T[7]<<endl;
