@@ -116,6 +116,7 @@ DEFINE_bool(output_filename, true, "Output image name instead of image index");
 
 typedef struct _target{
     unsigned int id;
+    string name;
     bool valid;
     ARPose pose;
     vector<cv::Point2f> object_position;
@@ -220,10 +221,10 @@ void detect(int a, int b, int c)
         if(detectedPage==-2){
             //filter the recognized region
             Mat erase_img=input_img.clone();
-            cout<<targetsList.size();
+            //cout<<targetsList.size();
             mutex_targetsList.lock();
             for(auto &target:targetsList){
-                cout<<"targetID:"<<target->id<<endl;
+                //cout<<"targetID:"<<target->id<<endl;
                 //cout<<target->inliners.size()<<endl;
                 RotatedRect rectPoint = minAreaRect(target->inliners);
                 cv::Point2f fourPoint2f[4];
@@ -240,11 +241,11 @@ void detect(int a, int b, int c)
                 }
                 int width=maxX-minX;
                 int height=maxY-minY;
-                /*Mat imageROI= erase_img(Rect(minX,minY,width,height));
+                Mat imageROI= erase_img(Rect(minX,minY,width,height));
                 Mat patch(height,width , CV_8UC3, Scalar(0,255,0));
                 Mat mask;
                 cvtColor(patch, mask, CV_BGR2GRAY); // 转为灰度图像，摄像头的输入图像
-                patch.copyTo(imageROI,mask);*/
+                patch.copyTo(imageROI,mask);
                 /*Mat srcImage = erase_img;
                 Mat signal = imread("/Users/lml/Desktop/image.orig/1.jpg");
                 Mat imageROI = erase_img(Rect(minX, minY, signal.cols, signal.rows));
@@ -280,12 +281,23 @@ void detect(int a, int b, int c)
             if(scores[indexed_scores[0]]>=0.03){
                 cout<<"found image:"<<image_name.c_str()<<"sim:"<<scores[indexed_scores[0]]<<endl;
                 detectedPage=atoi(image_name.c_str());
-                std::thread tracker(track,input_img,image_name);
-//                std::thread tracker(track,input_img,"0");
-                tracker.detach();
-                detectedPage=-2;
+                bool hasSFlag=false;
+                for(auto target:targetsList){
+                    cout<<target->name<<","<<image_name.c_str()<<endl;
+                    if(target->name==image_name.c_str()){
+                        hasSFlag=true;
+                    }
+                }
+                if(!hasSFlag){
+                    std::thread tracker(track,input_img,image_name);
+                    //                std::thread tracker(track,input_img,"0");
+                    tracker.detach();
+                    detectedPage=-2;
+                    canDetect=false;
+                }
             }
         }
+        
     }
 }
 
@@ -386,9 +398,9 @@ void trackingLost(target *new_target){
     detectedPage=-2;
 }
 
-void track(cv::Mat capImage,string queryImage){
+void track(cv::Mat capImage,string index){
     canDetect=false;
-    queryImage="/Users/lml/Desktop/image.orig/"+queryImage+".jpg";
+    string queryImage="/Users/lml/Desktop/image.orig/"+index+".jpg";
     //cout<<queryImage<<endl;
     Mat dstImage,prevImage;
     Mat srcImage=imread(queryImage,0); // 数据库中的图像
@@ -474,10 +486,14 @@ void track(cv::Mat capImage,string queryImage){
     //cout<<pos_points<<endl;
     
     target *new_target = new target();
+    new_target->name=index;
     new_target->object_position=pos_points;
     new_target->inliners.clear();
-    for(auto point:pos_points){
-        new_target->inliners.push_back(cv::Point(point.x,point.y));
+//    for(auto point:pos_points){
+//        new_target->inliners.push_back(cv::Point(point.x,point.y));
+//    }
+    for(auto point:inliners){
+        new_target->inliners.push_back(cv::Point(point.pt.x,point.pt.y));
     }
     new_target->id=++targetId;
 //    new_target->pose={0.7657,0.1866,-0.6155,0,-0.2725,0.9609,-0.0477,0,0.5826,0.2042,0.7866,0,-232.2759,-92.8866,-826.4772,1};
@@ -526,10 +542,10 @@ void track(cv::Mat capImage,string queryImage){
         //cout<<dst_2D<<endl;
         Mat outimg;
         inliners.clear();
-        //new_target->inliners.clear();
+        new_target->inliners.clear();
         for( size_t i = 0; i < dst_2D.size(); i++ ) {
             inliners.push_back(cv::KeyPoint(dst_2D[i], 1.f));
-            //new_target->inliners.push_back(cv::Point(dst_2D[i].x,dst_2D[i].y));
+            new_target->inliners.push_back(cv::Point(dst_2D[i].x,dst_2D[i].y));
         }
 //        drawKeypoints(dstImage, inliners, outimg , Scalar(255,0,0));
 //        namedWindow("outimg");
@@ -560,10 +576,10 @@ void track(cv::Mat capImage,string queryImage){
                     trackingLost(new_target);
                     return;
                 }
-                new_target->inliners.clear();
-                for(auto point:next_object_position){
-                    new_target->inliners.push_back(cv::Point(point.x,point.y));
-                }
+//                new_target->inliners.clear();
+//                for(auto point:next_object_position){
+//                    new_target->inliners.push_back(cv::Point(point.x,point.y));
+//                }
 //                Mat outimg=dstImage.clone();
 //                cv::line(outimg,next_object_position[3],next_object_position[0],Scalar(255,0,0));
 //                for(int i=0;i<3;i++){
