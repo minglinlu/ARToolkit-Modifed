@@ -119,6 +119,7 @@ typedef struct _target{
     bool valid;
     ARPose pose;
     vector<cv::Point2f> object_position;
+    vector<Point> inliners;
 } target;
 // ============================================================================
 
@@ -145,6 +146,8 @@ static int prefRefresh = 0;					// Fullscreen mode refresh rate. Set to 0 to use
 static int targetNum = 0;                   // Number of detect targets
 static int targetId = 0;                    // Initial target ID
 mutex mutex_targetsList;
+condition_variable cond_targetList;
+bool canDetect=false;
 vector<target*> targetsList;
 static cv::Mat camera_matrix = (cv::Mat_<double>(3,3) << 678.29, 0, 318.29, 0 , 637.774, 237.9, 0, 0, 1);
 static cv::Mat dist_coeffs = cv::Mat::zeros(4,1,cv::DataType<double>::type); // Assuming no lens distortion
@@ -210,12 +213,56 @@ cv::SiftDescriptorExtractor cv_sift_detector;
 void detect(int a, int b, int c)
 {
     while(1){
+        while(!canDetect){
+            std::unique_lock<std::mutex> lk(mutex_targetsList);
+            cond_targetList.wait(lk);
+        }
         if(detectedPage==-2){
+            //filter the recognized region
+            Mat erase_img=input_img.clone();
+            cout<<targetsList.size();
+            mutex_targetsList.lock();
+            for(auto &target:targetsList){
+                cout<<"targetID:"<<target->id<<endl;
+                //cout<<target->inliners.size()<<endl;
+                RotatedRect rectPoint = minAreaRect(target->inliners);
+                cv::Point2f fourPoint2f[4];
+                rectPoint.points(fourPoint2f);
+                for (int j = 0; j <= 3; j++){
+                    line(erase_img, fourPoint2f[j], fourPoint2f[(j + 1) % 4], Scalar(0,0,255));
+                }
+                int minX=640,minY=480,maxX=0,maxY=0;
+                for(auto point:fourPoint2f){
+                    minX=point.x<minX?point.x:minX;
+                    minY=point.y<minY?point.y:minY;
+                    maxX=point.x>maxX?point.x:maxX;
+                    maxY=point.y>maxY?point.y:maxY;
+                }
+                int width=maxX-minX;
+                int height=maxY-minY;
+                /*Mat imageROI= erase_img(Rect(minX,minY,width,height));
+                Mat patch(height,width , CV_8UC3, Scalar(0,255,0));
+                Mat mask;
+                cvtColor(patch, mask, CV_BGR2GRAY); // 转为灰度图像，摄像头的输入图像
+                patch.copyTo(imageROI,mask);*/
+                /*Mat srcImage = erase_img;
+                Mat signal = imread("/Users/lml/Desktop/image.orig/1.jpg");
+                Mat imageROI = erase_img(Rect(minX, minY, signal.cols, signal.rows));
+                Mat mask = imread("/Users/lml/Desktop/image.orig/1.jpg", 0);
+                signal.copyTo(imageROI, mask);*/
+                //cout<<target->object_position[0].x<<","<<target->object_position[0].y<<","<<target->object_position[2].y-target->object_position[0].y<<","<<target->object_position[2].x-target->object_position[0].x<<endl;
+                //Mat imageROI= erase_img(Rect(target->object_position[0].x,target->object_position[0].y,target->object_position[2].y-target->object_position[0].y,target->object_position[2].x-target->object_position[0].x));
+                //imshow("imageROI", imageROI);
+                imwrite("/Users/lml/Desktop/tmp.jpg", erase_img);
+                //cout<<target->object_position<<endl;
+            }
+            mutex_targetsList.unlock();
+            
             //1.extract sift descriptor
             std::vector<cv::KeyPoint> cv_keypoints;
             cv::Mat sift_descriptors;
-            cv_sift_detector.detect(input_img, cv_keypoints);
-            cv_sift_detector.compute(input_img, cv_keypoints, sift_descriptors);
+            cv_sift_detector.detect(erase_img, cv_keypoints);
+            cv_sift_detector.compute(erase_img, cv_keypoints, sift_descriptors);
             vot::SiftData sift_data;
             vot::OpencvKeyPoints2libvotSift(cv_keypoints, sift_descriptors, sift_data);
             //2.query the most similar image.
@@ -235,7 +282,8 @@ void detect(int a, int b, int c)
                 detectedPage=atoi(image_name.c_str());
                 std::thread tracker(track,input_img,image_name);
 //                std::thread tracker(track,input_img,"0");
-                tracker.join();
+                tracker.detach();
+                detectedPage=-2;
             }
         }
     }
@@ -327,12 +375,19 @@ void trackingLost(target *new_target){
             itarget++;
         }
     }
-    mutex_targetsList.unlock();
     delete new_target;
+    new_target=NULL;
+    mutex_targetsList.unlock();
+    {
+        std::lock_guard<std::mutex> lk(mutex_targetsList);
+        canDetect = true;
+    }
+    cond_targetList.notify_one();
     detectedPage=-2;
 }
 
 void track(cv::Mat capImage,string queryImage){
+    canDetect=false;
     queryImage="/Users/lml/Desktop/image.orig/"+queryImage+".jpg";
     //cout<<queryImage<<endl;
     Mat dstImage,prevImage;
@@ -345,6 +400,11 @@ void track(cv::Mat capImage,string queryImage){
     
     if(!isMatched(srcImage, dstImage, src_points, dst_points,matches)){
         detectedPage=-2;
+        {
+            std::lock_guard<std::mutex> lk(mutex_targetsList);
+            canDetect = true;
+        }
+        cond_targetList.notify_one();
         return;
     }
     
@@ -359,6 +419,11 @@ void track(cv::Mat capImage,string queryImage){
     if(match_num<6){
         cout<<"tracking lost, matches number <6. "<<endl;
         detectedPage=-2;
+        {
+            std::lock_guard<std::mutex> lk(mutex_targetsList);
+            canDetect = true;
+        }
+        cond_targetList.notify_one();
         return;
     }
 //    Mat outimg;
@@ -410,13 +475,17 @@ void track(cv::Mat capImage,string queryImage){
     
     target *new_target = new target();
     new_target->object_position=pos_points;
+    new_target->inliners.clear();
+    for(auto point:pos_points){
+        new_target->inliners.push_back(cv::Point(point.x,point.y));
+    }
     new_target->id=++targetId;
 //    new_target->pose={0.7657,0.1866,-0.6155,0,-0.2725,0.9609,-0.0477,0,0.5826,0.2042,0.7866,0,-232.2759,-92.8866,-826.4772,1};
     new_target->pose={
         1,0,0,0,
         0,1,0,0,
         0,0,1,0,
-        320,240,-800,1
+        320,240,800,1
     };
 //    new_target->pose={
 //        rotation_vector.at<double>(0,0),rotation_vector.at<double>(1,0),rotation_vector.at<double>(2,0),0,
@@ -425,8 +494,15 @@ void track(cv::Mat capImage,string queryImage){
 //        translation_vector.at<double>(0,0),translation_vector.at<double>(0,1),translation_vector.at<double>(0,2),1
 //    };
     new_target->valid=true;
+    mutex_targetsList.lock();
     targetsList.push_back(new_target);
-    
+    mutex_targetsList.unlock();
+    {
+        std::lock_guard<std::mutex> lk(mutex_targetsList);
+        canDetect = true;
+    }
+    cond_targetList.notify_one();
+    detectedPage=-2;
     while(1){
         //continue;
         //cout<<"tracking..."<<endl;
@@ -437,13 +513,23 @@ void track(cv::Mat capImage,string queryImage){
         vector<unsigned char> track_status;
         
         cv::calcOpticalFlowPyrLK(prevImage, dstImage, dst_2D, next_corners, track_status, err);
-        new_target->pose.T[12]=next_corners[0].x-320;
-        new_target->pose.T[13]=240-next_corners[0].y;
+        double sumX=0,sumY=0;
+        for(int i=0;i<next_corners.size();i++){
+            sumX+=next_corners[i].x;
+            sumY+=next_corners[i].y;
+        }
+        sumX/=next_corners.size();
+        sumY/=next_corners.size();
+        new_target->pose.T[12]=sumX-320;
+        new_target->pose.T[13]=240-sumY;
+        new_target->pose.T[14]=-800;
         //cout<<dst_2D<<endl;
         Mat outimg;
         inliners.clear();
+        //new_target->inliners.clear();
         for( size_t i = 0; i < dst_2D.size(); i++ ) {
             inliners.push_back(cv::KeyPoint(dst_2D[i], 1.f));
+            //new_target->inliners.push_back(cv::Point(dst_2D[i].x,dst_2D[i].y));
         }
 //        drawKeypoints(dstImage, inliners, outimg , Scalar(255,0,0));
 //        namedWindow("outimg");
@@ -464,27 +550,32 @@ void track(cv::Mat capImage,string queryImage){
         else{
             H = findHomography(Mat(dst_2D), Mat(next_corners), track_status,CV_RANSAC,5);
             if(countNonZero(H)==0){
+                trackingLost(new_target);
                 return;
             }
             else{
-                cout<<new_target->object_position<<endl;
+                //cout<<new_target->object_position<<endl;
                 vector<cv::Point2f> next_object_position = calcAffineTransformPoints(new_target->object_position, H);
                 if(!checkPtInsideImage(prevImage.size(), next_object_position)||!checkRectShape(next_object_position)||checkInsideArea(next_corners, next_object_position, track_status)<6){
                     trackingLost(new_target);
                     return;
                 }
-                Mat outimg=dstImage.clone();
-                cv::line(outimg,next_object_position[3],next_object_position[0],Scalar(255,0,0));
-                for(int i=0;i<3;i++){
-                    line(outimg,next_object_position[i],next_object_position[i+1],Scalar(255,0,5));
+                new_target->inliners.clear();
+                for(auto point:next_object_position){
+                    new_target->inliners.push_back(cv::Point(point.x,point.y));
                 }
-                inliners.clear();
-                for( size_t i = 0; i < next_corners.size(); i++ ) {
-                    inliners.push_back(cv::KeyPoint(next_corners[i], 1.f));
-                }
-                drawKeypoints(outimg, inliners, outimg , Scalar(255,0,0));
-                namedWindow("result");
-                imshow("result",outimg);
+//                Mat outimg=dstImage.clone();
+//                cv::line(outimg,next_object_position[3],next_object_position[0],Scalar(255,0,0));
+//                for(int i=0;i<3;i++){
+//                    line(outimg,next_object_position[i],next_object_position[i+1],Scalar(255,0,5));
+//                }
+//                inliners.clear();
+//                for( size_t i = 0; i < next_corners.size(); i++ ) {
+//                    inliners.push_back(cv::KeyPoint(next_corners[i], 1.f));
+//                }
+//                drawKeypoints(outimg, inliners, outimg , Scalar(255,0,0));
+//                namedWindow("result");
+//                imshow("result",outimg);
                 new_target->object_position=next_object_position;
                 dstImage.copyTo(prevImage);
                 dst_2D = next_corners;
@@ -521,7 +612,8 @@ void track(cv::Mat capImage,string queryImage){
 //            translation_vector.at<float>(0,0),translation_vector.at<float>(0,1),translation_vector.at<float>(0,2),1
 //        };
         
-        detectedPage=-1;
+//        detectedPage=-2;
+//        return;
     }
 }
 
@@ -564,7 +656,7 @@ int main(int argc, char** argv)
         std::cout << "[VocabMatch] Ext not supported by libvot\n";
     
     // get rank list output path from sift_filename
-    std::string output_path = sift_str;
+    /*std::string output_path = sift_str;
     output_path = tw::IO::GetFilename(sift_str) + ".rank";
     output_path = tw::IO::JoinPath(output_folder, output_path);
     
@@ -599,10 +691,15 @@ int main(int argc, char** argv)
     char buffer[250];
     getcwd(buffer, 250);
     std::cout << "[VocabMatch] Successful query and the rank list is output to " << buffer<<"/"<<output_path << ".\n";
-    fclose(match_file);
+    fclose(match_file);*/
     
     //创建线程对象detector,绑定线程函数为detector
     std::thread detector(detect, 1, 2, 3);
+    {
+        std::lock_guard<std::mutex> lk(mutex_targetsList);
+        canDetect = true;
+    }
+    cond_targetList.notify_one();
     //输出t1的线程ID
     //std::cout << "ID:" << t1.get_id() << std::endl;
     //等待t1线程函数执行结束
