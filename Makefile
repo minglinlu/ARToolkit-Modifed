@@ -49,14 +49,17 @@
 UNAME = $(shell uname)
 
 AR_HOME = ../..
-AR_CPPFLAGS = -I$(AR_HOME)/include/macosx-universal -I$(AR_HOME)/include
-AR_LDFLAGS = -L$(AR_HOME)/lib/macosx-universal -L$(AR_HOME)/lib
+AR_CPPFLAGS = -I$(AR_HOME)/include/macosx-universal -I$(AR_HOME)/include -I/Users/lml/Desktop/CPP/libvot/src -w
+#AR_LDFLAGS = -L$(AR_HOME)/lib/macosx-universal -L$(AR_HOME)/lib
+AR_LDFLAGS = -L$(AR_HOME)/lib
+OPENCV = `pkg-config --libs opencv` `pkg-config --cflags opencv`
+LIBVOT = -lvot_vocabtree -lvot_utils -lvot_matching -lvot_feature -lvlfeat -lgflags
 
 CC=cc
 CXX=c++
 CPPFLAGS = $(AR_CPPFLAGS)
 CFLAGS = -O -DHAVE_NFT=1
-CXXFLAGS = -O -DHAVE_NFT=1
+CXXFLAGS = -O -DHAVE_NFT=1 -std=c++11
 LDFLAGS = $(AR_LDFLAGS) 
 LIBS = -lKPM -lAR2 -lARUtil -lARgsub_lite -lARvideo -lAR -lARICP -lAR \
      -framework Accelerate -framework QTKit -framework CoreVideo -framework Carbon -framework GLUT -framework OpenGL -framework Cocoa -ljpeg
@@ -72,14 +75,16 @@ HEADERS = \
 OBJS = \
     nftSimple.o \
     ARMarkerNFT.o \
-    trackingSub.o
+    trackingSub.o \
+    orException.o \
+    commonCvFunctions.o
 
 default build all: $(TARGET)
 
 $(OBJS) : $(HEADERS)
 
 $(TARGET): $(OBJS)
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIBS)
+	$(CXX) $(LDFLAGS) -o $@ $^ ${OPENCV} ${LIBVOT} $(LIBS)
 
 clean:
 	-rm -f *.o *~ *.bak
