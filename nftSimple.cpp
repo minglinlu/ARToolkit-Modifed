@@ -79,7 +79,8 @@ static int prefDepth = 32;					// Fullscreen mode bit depth.
 static int prefRefresh = 0;					// Fullscreen mode refresh rate. Set to 0 to use default rate.
 static int targetId = 0;                    // Initial target ID
 mutex mutex_targetsList;
-condition_variable cond_targetList;
+mutex mutex_detect;
+condition_variable cond_detect;
 bool canDetect=false;
 
 //libvot config files
@@ -103,7 +104,7 @@ typedef struct _target{
 } target;
 vector<target*> targetsList;
 
-static cv::Mat camera_matrix = (cv::Mat_<double>(3,3) << 678.29, 0, 318.29, 0 , 637.774, 237.9, 0, 0, 1);
+static cv::Mat camera_matrix;
 static cv::Mat dist_coeffs = cv::Mat::zeros(4,1,cv::DataType<double>::type); // Assuming no lens distortion
 
 // Image acquisition.
@@ -114,7 +115,6 @@ static long			gCallCountMarkerDetect = 0;
 static KpmHandle           *kpmHandle = NULL;
 // NFT results.
 static int detectedPage = -2; // -2 Tracking not inited, -1 tracking inited OK, >= 0 tracking online on page.
-static float trackingTrans[3][4];
 
 // Drawing.
 static int gWindowW;
@@ -136,6 +136,9 @@ static void Reshape(int w, int h);
 static void Display(void);
 static void detect(int a, int b, int c);
 static void track(cv::Mat capImage,string queryImage);
+bool isMatched(Mat &srcImage,Mat &dstImage,vector<KeyPoint> &src_points,vector<KeyPoint> &dst_points,vector<DMatch> &matches);
+vector<KeyPoint> getInliners(vector<KeyPoint> src_points,vector<KeyPoint> dst_points,vector<DMatch> &final_matches,vector<cv::Point3f> &src_3D,vector<cv::Point2f> &dst_2D,cv::Mat &H);
+bool updateCamPose(vector<cv::Point3f> &src_3D,vector<cv::Point2f> &dst_2D,Mat &rotation_vector,Mat &translation_vector,float trackingTrans[3][4]);
 void trackingLost(target *new_target);
 
 // ============================================================================
@@ -143,9 +146,9 @@ void trackingLost(target *new_target);
 void detect(int a, int b, int c)
 {
     while(1){
+        std::unique_lock<std::mutex> lk(mutex_detect);
         while(!canDetect){
-            std::unique_lock<std::mutex> lk(mutex_targetsList);
-            cond_targetList.wait(lk);
+            cond_detect.wait(lk);
         }
         if(detectedPage==-2){
             //filter the recognized region
@@ -286,15 +289,64 @@ vector<KeyPoint> getInliners(vector<KeyPoint> src_points,vector<KeyPoint> dst_po
     return inliners;
 }
 
-void updateCamPose(vector<cv::Point3f> &src_3D,vector<cv::Point2f> &dst_2D,Mat &rotation_vector,Mat &translation_vector,Mat &_R_matrix){
+bool updateCamPose(vector<cv::Point3f> &src_3D,vector<cv::Point2f> &dst_2D,Mat &rotation_vector,Mat &translation_vector,float trackingTrans[3][4]){
     // Solve for pose
     //cv::solvePnPRansac(src_3D, dst_2D, camera_matrix, dist_coeffs, rotation_vector, translation_vector);
-    cv::solvePnP(src_3D, dst_2D, camera_matrix, dist_coeffs, rotation_vector, translation_vector);
-    Rodrigues(rotation_vector,_R_matrix);                   // converts Rotation Vector to Matrix
-    _R_matrix.convertTo(_R_matrix, CV_32FC1);
-    translation_vector.convertTo(translation_vector, CV_32FC1);
+//    cv::solvePnP(src_3D, dst_2D, camera_matrix, dist_coeffs, rotation_vector, translation_vector);
+//    Rodrigues(rotation_vector,_R_matrix);                   // converts Rotation Vector to Matrix
+//    _R_matrix.convertTo(_R_matrix, CV_32FC1);
+//    translation_vector.convertTo(translation_vector, CV_32FC1);
     //    cout<<_R_matrix<<endl;
     //    cout<<translation_vector<<endl;
+    if(src_3D.size()<4) return false;
+    ICPHandleT *icpHandle;
+    ICPDataT icpData;
+    ICP2DCoordT *sCoord;
+    ICP3DCoordT *wCoord;
+    ARdouble initMatXw2Xc[3][4];
+    ARdouble err;
+    int i;
+    
+    arMalloc(sCoord, ICP2DCoordT, src_3D.size());
+    arMalloc(wCoord, ICP3DCoordT, src_3D.size());
+    
+    for(i=0;i<src_3D.size();i++){
+        sCoord[i].x=dst_2D[i].x;
+        sCoord[i].y=dst_2D[i].y;
+        wCoord[i].x=src_3D[i].x;
+        wCoord[i].y=src_3D[i].y;
+        wCoord[i].z=src_3D[i].z;
+    }
+    icpData.num=i;
+    icpData.screenCoord=&sCoord[0];
+    icpData.worldCoord=&wCoord[0];
+    
+    if(icpGetInitXw2Xc_from_PlanarData(gCparamLT->param.mat, sCoord, wCoord, (int)src_3D.size(), initMatXw2Xc)<0){
+        free(sCoord);
+        free(wCoord);
+        return false;
+    }
+    
+    if((icpHandle=icpCreateHandle(gCparamLT->param.mat))==NULL){
+        free(sCoord);
+        free(wCoord);
+        return false;
+    }
+    
+    ARdouble camPosed[3][4];
+    if(icpPoint(icpHandle, &icpData, initMatXw2Xc, camPosed, &err)<0){
+        free(sCoord);
+        free(wCoord);
+        icpDeleteHandle(&icpHandle);
+        return false;
+    }
+    
+    for(int r=0;r<3;r++)for(int c=0;c<4;c++){trackingTrans[r][c]=(float)camPosed[r][c];}
+    icpDeleteHandle(&icpHandle);
+    free(sCoord);
+    free(wCoord);
+    if(err>10.0f)return false;
+    return true;
 }
 
 void trackingLost(target *new_target){
@@ -311,15 +363,15 @@ void trackingLost(target *new_target){
     new_target=NULL;
     mutex_targetsList.unlock();
     {
-        std::lock_guard<std::mutex> lk(mutex_targetsList);
+        std::lock_guard<std::mutex> lk(mutex_detect);
         canDetect = true;
     }
-    cond_targetList.notify_one();
+    cond_detect.notify_one();
     detectedPage=-2;
 }
 
 void track(cv::Mat capImage,string index){
-    canDetect=false;
+    sleep(1);
     string queryImage="/Users/lml/Desktop/image.orig/"+index+".jpg";
     //cout<<queryImage<<endl;
     Mat dstImage,prevImage;
@@ -331,12 +383,13 @@ void track(cv::Mat capImage,string index){
     vector<DMatch> final_matches,matches;
     
     if(!isMatched(srcImage, dstImage, src_points, dst_points,matches)){
+        cout<<"is not matched"<<endl;
         detectedPage=-2;
         {
-            std::lock_guard<std::mutex> lk(mutex_targetsList);
+            std::lock_guard<std::mutex> lk(mutex_detect);
             canDetect = true;
         }
-        cond_targetList.notify_one();
+        cond_detect.notify_one();
         return;
     }
     
@@ -352,10 +405,10 @@ void track(cv::Mat capImage,string index){
         cout<<"tracking lost, matches number <6. "<<endl;
         detectedPage=-2;
         {
-            std::lock_guard<std::mutex> lk(mutex_targetsList);
+            std::lock_guard<std::mutex> lk(mutex_detect);
             canDetect = true;
         }
-        cond_targetList.notify_one();
+        cond_detect.notify_one();
         return;
     }
     //    Mat outimg;
@@ -366,8 +419,22 @@ void track(cv::Mat capImage,string index){
     cv::Mat rotation_vector; // Rotation in axis-angle form
     cv::Mat translation_vector;
     cv::Mat _R_matrix;
-    
-    //updateCamPose(src_3D,dst_2D,rotation_vector,translation_vector,_R_matrix);
+    float trackingTrans[3][4];
+    if(!updateCamPose(src_3D,dst_2D,rotation_vector,translation_vector,trackingTrans)){
+        {
+            std::lock_guard<std::mutex> lk(mutex_detect);
+            canDetect = true;
+        }
+        cond_detect.notify_one();
+        return;
+    }
+//    for(int i=0;i<3;i++)
+//        for(int j=0;j<4;j++){
+//            cout<<trackingTrans[i][j]<<",";
+//        }
+//        cout<<endl;
+//    }
+//    return;
     Size size=srcImage.size();
     vector<cv::Point2f> pos_points=calcAffineTransformRect(size, H);
     
@@ -383,22 +450,28 @@ void track(cv::Mat capImage,string index){
     }
     new_target->id=++targetId;
     //    new_target->pose={0.7657,0.1866,-0.6155,0,-0.2725,0.9609,-0.0477,0,0.5826,0.2042,0.7866,0,-232.2759,-92.8866,-826.4772,1};
+    //arglCameraViewRH((const ARdouble (*)[4])trackingTrans, new_target->pose.T, VIEW_SCALEFACTOR);
     new_target->pose={
-        1,0,0,0,
-        0,1,0,0,
-        0,0,1,0,
-        320,240,800,1
+        trackingTrans[0][0],-trackingTrans[1][0],-trackingTrans[2][0],0,
+        trackingTrans[0][1],-trackingTrans[1][1],-trackingTrans[2][1],0,
+        trackingTrans[0][2],-trackingTrans[1][2],-trackingTrans[2][2],0,
+        trackingTrans[0][3],-trackingTrans[1][3],-trackingTrans[2][3],1
     };
-    
+
+//    cout<<new_target->pose.T[0]<<","<<new_target->pose.T[1]<<","<<new_target->pose.T[2]<<":"<<new_target->pose.T[3]<<endl;
+//    cout<<new_target->pose.T[4]<<","<<new_target->pose.T[5]<<","<<new_target->pose.T[6]<<":"<<new_target->pose.T[7]<<endl;
+//    cout<<new_target->pose.T[8]<<","<<new_target->pose.T[9]<<","<<new_target->pose.T[10]<<":"<<new_target->pose.T[11]<<endl;
+//    cout<<new_target->pose.T[12]<<","<<new_target->pose.T[13]<<","<<new_target->pose.T[14]<<":"<<new_target->pose.T[15]<<endl;
+
     new_target->valid=true;
     mutex_targetsList.lock();
     targetsList.push_back(new_target);
     mutex_targetsList.unlock();
     {
-        std::lock_guard<std::mutex> lk(mutex_targetsList);
+        std::lock_guard<std::mutex> lk(mutex_detect);
         canDetect = true;
     }
-    cond_targetList.notify_one();
+    cond_detect.notify_one();
     detectedPage=-2;
     while(1){
         //continue;
@@ -410,17 +483,17 @@ void track(cv::Mat capImage,string index){
         vector<unsigned char> track_status;
         
         cv::calcOpticalFlowPyrLK(prevImage, dstImage, dst_2D, next_corners, track_status, err);
-        double sumX=0,sumY=0;
-        for(int i=0;i<next_corners.size();i++){
-            sumX+=next_corners[i].x;
-            sumY+=next_corners[i].y;
-        }
-        sumX/=next_corners.size();
-        sumY/=next_corners.size();
-        new_target->pose.T[12]=sumX-320;
-        new_target->pose.T[13]=240-sumY;
-        new_target->pose.T[14]=-800;
-        //cout<<dst_2D<<endl;
+//        double sumX=0,sumY=0;
+//        for(int i=0;i<next_corners.size();i++){
+//            sumX+=next_corners[i].x;
+//            sumY+=next_corners[i].y;
+//        }
+//        sumX/=next_corners.size();
+//        sumY/=next_corners.size();
+//        new_target->pose.T[12]=sumX-gCparamLT->param.xsize/2;
+//        new_target->pose.T[13]=gCparamLT->param.ysize/2-sumY;
+        //cout<<new_target->pose.T[12]<<","<<new_target->pose.T[13]<<endl;
+//        new_target->pose.T[14]=-800;
         Mat outimg;
         inliners.clear();
         new_target->inliners.clear();
@@ -461,13 +534,22 @@ void track(cv::Mat capImage,string index){
                 new_target->object_position=next_object_position;
                 dstImage.copyTo(prevImage);
                 dst_2D = next_corners;
+                if(!updateCamPose(src_3D,dst_2D,rotation_vector,translation_vector,trackingTrans)){
+                    trackingLost(new_target);
+                    return;
+                }
+                new_target->pose={
+                    trackingTrans[0][0],-trackingTrans[1][0],-trackingTrans[2][0],0,
+                    trackingTrans[0][1],-trackingTrans[1][1],-trackingTrans[2][1],0,
+                    trackingTrans[0][2],-trackingTrans[1][2],-trackingTrans[2][2],0,
+                    trackingTrans[0][3],-trackingTrans[1][3],-trackingTrans[2][3],1
+                };
             }
         }
     }
 }
 
 // ============================================================================
-
 int main(int argc, char** argv)
 {
     // ============================================================================
@@ -485,18 +567,6 @@ int main(int argc, char** argv)
     tree->ReadTree(image_db);
     std::cout << "[VocabMatch] Successfully read vocabulary tree (with image database) file " << image_db << std::endl;
     tree->Show();
-    
-    //创建线程对象detector,绑定线程函数为detector
-    std::thread detector(detect, 1, 2, 3);
-    {
-        std::lock_guard<std::mutex> lk(mutex_targetsList);
-        canDetect = true;
-    }
-    cond_targetList.notify_one();
-    //输出t1的线程ID
-    //std::cout << "ID:" << t1.get_id() << std::endl;
-    //等待t1线程函数执行结束
-    //detector.join();
     // ============================================================================
     char glutGamemode[32];
     const char *cparam_name = "Data2/camera_para.dat";
@@ -525,6 +595,9 @@ int main(int argc, char** argv)
         glutEnterGameMode();
     } else {
         glutInitWindowSize(gCparamLT->param.xsize, gCparamLT->param.ysize);
+        camera_matrix= (cv::Mat_<double>(3,3) << gCparamLT->param.mat[0][0],gCparamLT->param.mat[0][1],gCparamLT->param.mat[0][2],gCparamLT->param.mat[1][0],gCparamLT->param.mat[1][1],gCparamLT->param.mat[1][2],gCparamLT->param.mat[2][0],gCparamLT->param.mat[2][1],gCparamLT->param.mat[2][2]);
+        //cout<<gCparamLT->param.xsize<<endl;
+        //cout<<gCparamLT->param.ysize<<endl;
         glutCreateWindow(argv[0]);
     }
     
@@ -541,6 +614,20 @@ int main(int argc, char** argv)
         ARLOGe("setupCamera(): Unable to begin camera data capture.\n");
         return (FALSE);
     }
+    
+    // Here we start out detect thread.
+    //创建线程对象detector,绑定线程函数为detector
+    std::thread detector(detect, 1, 2, 3);
+    sleep(1);
+    {
+        std::lock_guard<std::mutex> lk(mutex_detect);
+        canDetect = true;
+    }
+    cond_detect.notify_one();
+    //输出t1的线程ID
+    std::cout << "ID:" << detector.get_id() << std::endl;
+    //等待t1线程函数执行结束
+    detector.detach();
     
     // Register GLUT event-handling callbacks.
     // NB: mainLoop() is registered by Visibility.
@@ -783,13 +870,11 @@ static void Display(void)
     //cout<<"targetsList.size():"<<targetsList.size()<<endl;
     //gluLookAt(0,0,0,0,0,1,0,-1,0);
     for(auto target:targetsList){
-        //target->pose.T[13]+=1;
-        //target->pose.T[14]+=1;
         glLoadMatrixd(target->pose.T);
-        //                cout<<target->pose.T[0]<<","<<target->pose.T[1]<<","<<target->pose.T[2]<<target->pose.T[3]<<endl;
-        //                cout<<target->pose.T[4]<<","<<target->pose.T[5]<<","<<target->pose.T[6]<<target->pose.T[7]<<endl;
-        //                cout<<target->pose.T[8]<<","<<target->pose.T[9]<<","<<target->pose.T[10]<<target->pose.T[11]<<endl;
-        //                cout<<target->pose.T[12]<<","<<target->pose.T[13]<<","<<target->pose.T[14]<<","<<target->pose.T[15]<<endl;
+//        cout<<target->pose.T[0]<<","<<target->pose.T[1]<<","<<target->pose.T[2]<<":"<<target->pose.T[3]<<endl;
+//        cout<<target->pose.T[4]<<","<<target->pose.T[5]<<","<<target->pose.T[6]<<":"<<target->pose.T[7]<<endl;
+//        cout<<target->pose.T[8]<<","<<target->pose.T[9]<<","<<target->pose.T[10]<<":"<<target->pose.T[11]<<endl;
+//        cout<<target->pose.T[12]<<","<<target->pose.T[13]<<","<<target->pose.T[14]<<":"<<target->pose.T[15]<<endl;
         DrawCube();
     }
     mutex_targetsList.unlock();
