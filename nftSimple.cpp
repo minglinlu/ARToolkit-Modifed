@@ -83,9 +83,10 @@ mutex mutex_detect;
 condition_variable cond_detect;
 bool canDetect=false;
 
-//libvot config files
+//libvot config files, you have to read more about libvot, and use it to generate the image_list and train the db.out
 const char *db_image_list = "/Users/lml/Desktop/CPP/libvot/build/bin/image_list";
 const char *image_db = "/Users/lml/Desktop/CPP/libvot/build/bin/vocab_out/db.out";
+const string image_directory="/Users/lml/Desktop/image.orig/";//This is the directory contains your registered images
 const std::string output_folder = FLAGS_output_folder;
 std::vector<std::string> db_image_filenames;
 vot::VocabTree *tree = new vot::VocabTree();
@@ -142,7 +143,6 @@ bool updateCamPose(vector<cv::Point3f> &src_3D,vector<cv::Point2f> &dst_2D,Mat &
 void trackingLost(target *new_target);
 
 // ============================================================================
-
 void detect(int a, int b, int c)
 {
     while(1){
@@ -245,7 +245,6 @@ bool isMatched(Mat &srcImage,Mat &dstImage,vector<KeyPoint> &src_points,vector<K
     //cout<<"original match points     :"<<matches.size()<<endl;
     if(matches.size()<6){
         cout<<"tracking lost, matches number <6. "<<endl;
-        
         return false;
     }
     return true;
@@ -345,7 +344,7 @@ bool updateCamPose(vector<cv::Point3f> &src_3D,vector<cv::Point2f> &dst_2D,Mat &
     icpDeleteHandle(&icpHandle);
     free(sCoord);
     free(wCoord);
-    if(err>10.0f)return false;
+    if(err>20.0f)return false;
     return true;
 }
 
@@ -372,7 +371,7 @@ void trackingLost(target *new_target){
 
 void track(cv::Mat capImage,string index){
     sleep(1);
-    string queryImage="/Users/lml/Desktop/image.orig/"+index+".jpg";
+    string queryImage=image_directory+index+".jpg";
     //cout<<queryImage<<endl;
     Mat dstImage,prevImage;
     Mat srcImage=imread(queryImage,0); // 数据库中的图像
