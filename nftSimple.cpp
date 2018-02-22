@@ -87,6 +87,7 @@ bool canDetect=false;
 const char *db_image_list = "/Users/lml/Desktop/CPP/libvot/build/bin/image_list";
 const char *image_db = "/Users/lml/Desktop/CPP/libvot/build/bin/vocab_out/db.out";
 const string image_directory="/Users/lml/Desktop/image.orig/";//This is the directory contains your registered images
+const string tmp_file="/Users/lml/Desktop/tmp.jpg";//To generate some intermediate files for debuging
 const std::string output_folder = FLAGS_output_folder;
 std::vector<std::string> db_image_filenames;
 vot::VocabTree *tree = new vot::VocabTree();
@@ -179,7 +180,7 @@ void detect(int a, int b, int c)
                 Mat mask;
                 cvtColor(patch, mask, CV_BGR2GRAY); // 转为灰度图像，摄像头的输入图像
                 patch.copyTo(imageROI,mask);
-                imwrite("/Users/lml/Desktop/tmp.jpg", erase_img);
+                imwrite(tmp_file, erase_img);
                 //cout<<target->object_position<<endl;
             }
             mutex_targetsList.unlock();
