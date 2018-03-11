@@ -290,15 +290,27 @@ vector<KeyPoint> getInliners(vector<KeyPoint> src_points,vector<KeyPoint> dst_po
 }
 
 bool updateCamPose(vector<cv::Point3f> &src_3D,vector<cv::Point2f> &dst_2D,Mat &rotation_vector,Mat &translation_vector,float trackingTrans[3][4]){
+    if(src_3D.size()<4) return false;
+    
     // Solve for pose
     //cv::solvePnPRansac(src_3D, dst_2D, camera_matrix, dist_coeffs, rotation_vector, translation_vector);
-//    cv::solvePnP(src_3D, dst_2D, camera_matrix, dist_coeffs, rotation_vector, translation_vector);
-//    Rodrigues(rotation_vector,_R_matrix);                   // converts Rotation Vector to Matrix
-//    _R_matrix.convertTo(_R_matrix, CV_32FC1);
-//    translation_vector.convertTo(translation_vector, CV_32FC1);
+    cv::solvePnP(src_3D, dst_2D, camera_matrix, dist_coeffs, rotation_vector, translation_vector);
+    cv::Mat _R_matrix;
+    Rodrigues(rotation_vector,_R_matrix);                   // converts Rotation Vector to Matrix
+    _R_matrix.convertTo(_R_matrix, CV_32FC1);
+    translation_vector.convertTo(translation_vector, CV_32FC1);
     //    cout<<_R_matrix<<endl;
     //    cout<<translation_vector<<endl;
-    if(src_3D.size()<4) return false;
+    for(int i=0;i<3;i++){
+        for(int j=0;j<3;j++){
+            trackingTrans[i][j]=_R_matrix.at<float>(i,j);
+        }
+    }
+    trackingTrans[0][3]=translation_vector.at<float>(0,0);
+    trackingTrans[1][3]=translation_vector.at<float>(1,0);
+    trackingTrans[2][3]=translation_vector.at<float>(2,0);
+    
+/*
     ICPHandleT *icpHandle;
     ICPDataT icpData;
     ICP2DCoordT *sCoord;
@@ -345,7 +357,7 @@ bool updateCamPose(vector<cv::Point3f> &src_3D,vector<cv::Point2f> &dst_2D,Mat &
     icpDeleteHandle(&icpHandle);
     free(sCoord);
     free(wCoord);
-    if(err>20.0f)return false;
+    if(err>20.0f)return false;*/
     return true;
 }
 
